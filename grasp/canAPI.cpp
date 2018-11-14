@@ -23,6 +23,7 @@ typedef char BYTE;
 typedef void* LPSTR;
 
 #include <PCANBasic.h>
+#include <iostream>
 
 #include "canDef.h"
 #include "canAPI.h"
@@ -112,14 +113,14 @@ int initCAN(int bus){
 		return Status;
 	}
 
-	Status = CAN_Reset(canDev[bus]);
-	if (Status != PCAN_ERROR_OK)
-	{
-		CAN_GetErrorText(Status, 0, strMsg);
-		printf("initCAN(): CAN_Reset() failed with error %ld\n", Status);
-		printf("%s\n", strMsg);
-		return Status;
-	}
+//	Status = CAN_Reset(canDev[bus]);
+//	if (Status != PCAN_ERROR_OK)
+//	{
+//		CAN_GetErrorText(Status, 0, strMsg);
+//		printf("initCAN(): CAN_Reset() failed with error %ld\n", Status);
+//		printf("%s\n", strMsg);
+//		return Status;
+//	}
 
 	return 0; // PCAN_ERROR_OK
 }
@@ -267,13 +268,13 @@ int command_can_sys_init(int ch, int period_msec)
 
 	usleep(10);
 
-	Txid = ((unsigned long)ID_CMD_SET_MODE_TASK<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
+	Txid = ((unsigned long)ID_CMD_SET_MODE_JOINT<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
 	ret = canSendMsg(ch, Txid, 0, data, TRUE);
 
 	usleep(10);
 
-	Txid = ((unsigned long)ID_CMD_QUERY_STATE_DATA<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
-	ret = canSendMsg(ch, Txid, 0, data, TRUE);
+//	Txid = ((unsigned long)ID_CMD_QUERY_STATE_DATA<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
+//	ret = canSendMsg(ch, Txid, 0, data, TRUE);
 
 	return 0; //PCAN_ERROR_OK;
 }
@@ -286,10 +287,10 @@ int command_can_start(int ch)
 	unsigned char data[8];
 	int ret;
 
-	Txid = ((unsigned long)ID_CMD_QUERY_STATE_DATA<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
-	ret = canSendMsg(ch, Txid, 0, data, TRUE);
+//	Txid = ((unsigned long)ID_CMD_QUERY_STATE_DATA<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
+//	ret = canSendMsg(ch, Txid, 0, data, TRUE);
 
-	usleep(10);
+	//usleep(10);
 
 	Txid = ((unsigned long)ID_CMD_SET_SYSTEM_ON<<6) | ((unsigned long)ID_COMMON <<3) | ((unsigned long)ID_DEVICE_MAIN);
 	ret = canSendMsg(ch, Txid, 0, data, TRUE);
@@ -339,6 +340,7 @@ int write_current(int ch, int findex, short* pwm)
 	{
 		data[0] = (unsigned char)( (pwm[0] >> 8) & 0x00ff);
 		data[1] = (unsigned char)(pwm[0] & 0x00ff);
+        std::cout<< "data[0]: " << data[0] << ", data[1]: " << data[1] << std::endl;
 
 		data[2] = (unsigned char)( (pwm[1] >> 8) & 0x00ff);
 		data[3] = (unsigned char)(pwm[1] & 0x00ff);
