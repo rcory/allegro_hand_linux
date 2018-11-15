@@ -29,100 +29,164 @@ else
     error('CAN channel could not start');
 end
 
-CommandSysInit(canch, 3);  % 3 ms period
-stop(canch);
+% get the available message identifier fields for the Allegro hand.
+ids = get_command_ids;
 
-disp(['CAN channel is closed. Status: ', ...
-    num2str(canch.Running)]);
+CommandSysInit(canch, ids);  % initialize and enable the hand
+CommandTorque(canch, ids);  % command torque to the hand
+CommandSysClose(canch, ids);  % disable the hand
+
+stop(canch);
+disp(['CAN channel is closed. Status: ', num2str(canch.Running)]);
 
 clear all;
 
 end
 
 % configures the allegro hand comm period, and cmd mode.
-function CommandSysInit(canch, period_ms)
+function CommandSysInit(canch, ids)
 
-dst_id = bitshift(uint32(hex2dec('01')), 3);  % allegro hand id
-src_id = uint32(hex2dec('02'));  % control pc id
+% set the communication period.
+period_ms = 3;
 
-%% ========== set the period ==============
-cmd_id = bitshift(uint32(hex2dec('03')), 6);  % set period cmd
+% source and destination ids.
+dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
+src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+
+%% set the period
+can_msg.cmd_id = ids.ID_CMD_SET_PERIOD;
+can_msg.src_id = src_id;
+can_msg.dst_id = dst_id;
+can_msg.data = period_ms;
+tx_can_msg(canch, can_msg);
+
+%% set mode joint
+can_msg.cmd_id = ids.ID_CMD_SET_MODE_JOINT;
+can_msg.src_id = src_id;
+can_msg.dst_id = dst_id;
+can_msg.data = 0;
+tx_can_msg(canch, can_msg);
+
+%% set system on
+can_msg.cmd_id = ids.ID_CMD_SET_SYSTEM_ON;
+can_msg.src_id = src_id;
+can_msg.dst_id = dst_id;
+can_msg.data = 0;
+tx_can_msg(canch, can_msg);
+
+end
+
+function CommandTorque(canch, ids)
+
+% source and destination ids.
+dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
+src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+
+%% command torque to the index finger
+tau_cov_const_v3 = 1200.0; % torque -> pwm conversion factor (?)
+
+% desired torque is ordered from distal to proximal joints.
+tau_des = [0 0 0 0.05] .* tau_cov_const_v3; % torque->pwm
+
+can_msg.cmd_id = ids.ID_CMD_SET_TORQUE_1;
+can_msg.src_id = src_id;
+can_msg.dst_id = dst_id;
+can_msg.data = zeros(8,1);  % initialize the data vector
+can_msg.data([2, 1]) = typecast(int16(tau_des(1)), 'int8');
+can_msg.data([4, 3]) = typecast(int16(tau_des(2)), 'int8');
+can_msg.data([6, 5]) = typecast(int16(tau_des(3)), 'int8');
+can_msg.data([8, 7]) = typecast(int16(tau_des(4)), 'int8');
+
+% command torque for 1 second, updating every dt
+dt = 0.003;
+for i=1:ceil(1/dt)
+    tx_can_msg(canch, can_msg);
+    pause(dt);
+end
+
+end
+
+function CommandSysClose(canch, ids)
+% source and destination ids.
+dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
+src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+
+%% set system off
+can_msg.cmd_id = ids.ID_CMD_SET_SYSTEM_OFF;
+can_msg.src_id = src_id;
+can_msg.dst_id = dst_id;
+can_msg.data = 0;
+tx_can_msg(canch, can_msg);
+
+end
+
+function ids = get_command_ids
+
+ids.ID_CMD_SET_SYSTEM_ON = hex2dec('01');
+ids.ID_CMD_SET_SYSTEM_OFF = hex2dec('02');
+ids.ID_CMD_SET_PERIOD = hex2dec('03');
+ids.ID_CMD_SET_MODE_JOINT = hex2dec('04');
+ids.ID_CMD_SET_MODE_TASK = hex2dec('05');
+ids.ID_CMD_SET_TORQUE_1 = hex2dec('06');
+ids.ID_CMD_SET_TORQUE_2 = hex2dec('07');
+ids.ID_CMD_SET_TORQUE_3 = hex2dec('08');
+ids.ID_CMD_SET_TORQUE_4 = hex2dec('09');
+ids.ID_CMD_QUERY_STATE_DATA = hex2dec('0e');
+ids.ID_CMD_QUERY_CONTROL_DATA = hex2dec('0f');
+
+ids.ID_COMMON = hex2dec('01');
+ids.ID_DEVICE_MAIN = hex2dec('02');
+ids.ID_DEVICE_SUB_01 = hex2dec('03');
+ids.ID_DEVICE_SUB_02 = hex2dec('04');
+ids.ID_DEVICE_SUB_03 = hex2dec('05');
+ids.ID_DEVICE_SUB_04 = hex2dec('06');
+
+end
+
+function tx_can_msg(canch, can_msg)
+% We determine the data length by checking the size of the can_msg.data 
+% variable.
+% can_msg.cmd_id is the decimal representation of the hex command 
+% identifier, e.g., after calling hex2dec.
+% can_msg.data is always converted to an array of uint8 in this function,
+% regardless of the incoming data type.
+
+cmd_id = can_msg.cmd_id;
+src_id = can_msg.src_id;
+dst_id = can_msg.dst_id;
+data = can_msg.data;
+
+% first pad the data with zeros
+dsize = size(data);
+if (length(dsize) ~= 2 || (dsize(1) ~= 1 && dsize(2) ~= 1))
+    error('Data vector must be an nx1');
+end
+dlen = length(data);
+
+% make sure data is a column vector
+data = reshape(data, dlen, 1);
+
+% front pad the data with zeros to make 8 bytes of data
+if (dlen < 8)
+    data = [zeros(8-dlen,1); data];
+end
+
+% convert to uint8
+data = uint8(data);
+
+% set the command identifier in the CAN msg identifier
+cmd_id = bitshift(uint32(cmd_id), 6);  % set period cmd
 
 id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
 id = bitor(id, src_id);
 
-data = uint8(period_ms);  % set the data
+message = canMessage(id, false, dlen);
 
-message = canMessage(id, false, 1);  % 1 byte for ID_CMD_SET_PERIOD
+data = typecast(data,'int64');  % typecast to 64-bit integer
 
-pack(message, data, 0, 8, 'LittleEndian');
+pack(message, data, 0, dlen * 8, 'LittleEndian');
 transmit(canch, message);
 
-pause(10*1e-3);
-
-%% =========== set mode joint ===============
-cmd_id = bitshift(uint32(hex2dec('04')), 6);  % set mode joint
-id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
-id = bitor(id, src_id);
-
-data = uint8(0);
-
-message = canMessage(id, false, 1);  % 0 bytes for ID_CMD_SET_MODE_JOINT
-
-pack(message, data, 0, 8, 'LittleEndian');
-transmit(canch, message);
-
-pause(10*1e-3);
-
-%% =========== set system on ===============================
-cmd_id = bitshift(uint32(hex2dec('01')), 6);  % set mode joint
-id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
-id = bitor(id, src_id);
-
-data = uint8(0);
-
-message = canMessage(id, false, 1);  % 0 bytes
-
-pack(message, data, 0, 8, 'LittleEndian');
-transmit(canch, message);
-
-pause(1e-3);
-
-%% =========== command torque to the index finger ==============
-tau_cov_const_v3 = 1200.0;
-cmd_id = bitshift(uint32(hex2dec('06')), 6);  % set torque index finger
-id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
-id = bitor(id, src_id);
-
-% desired current
-cur_des = [0 0 0 0.05] .* tau_cov_const_v3; % torque->pwm
-
-data = repmat(uint8(0), 8, 1);  % initialize the data vector
-data([2, 1]) = typecast(int16(cur_des(1)), 'int8');
-data([4, 3]) = typecast(int16(cur_des(2)), 'int8');
-data([6, 5]) = typecast(int16(cur_des(3)), 'int8');
-data([8, 7]) = typecast(int16(cur_des(4)), 'int8');
-
-message = canMessage(id, false, 8);  % 8 bytes
-
-data = typecast(data,'int64');  % typecast to 32-bit integer
-pack(message, data, 0, 64, 'LittleEndian');
-
-disp('Commanding torque...');
-transmit(canch, message);
-pause(1);
-disp('Done.');
-
-%% =========== set system off ====================================
-cmd_id = bitshift(uint32(hex2dec('02')), 6);  % set mode joint
-id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
-id = bitor(id, src_id);
-
-data = uint8(0);
-
-message = canMessage(id, false, 1);  % 0 bytes
-
-pack(message, data, 0, 8, 'LittleEndian');
-transmit(canch, message);
+pause(10*1e-6);
 
 end
