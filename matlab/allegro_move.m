@@ -36,10 +36,10 @@ ids = get_command_ids;
 period_ms = 10;  % ms
 
 CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
-CommandReadState(canch, ids, period_ms*1e-3);  % read the state
+CommandReadState(canch, ids, period_ms*1e-3);
+%CommandReportMsgCount(canch, period_ms*1e-3);  % read the state
 %CommandSendTorque(canch, ids);  % command torque to the hand
 %CommandSendSingleTorque(canch, ids);  % command torque to the hand
-pause(3);
 
 CommandSysClose(canch, ids);  % disable the hand
 
@@ -106,7 +106,7 @@ tx_can_msg(canch, can_msg);
 
 end
 
-function CommandReadState(canch, ids, dt)
+function CommandReportMsgCount(canch, dt)
 % Read and plot the state for n seconds
 sec = 0.1;
 
@@ -123,9 +123,7 @@ for i=1:1e10
     if (~isempty(msgin))
         count = count +1;
         if (length(msgin) == 4)
-            for j=1:4  % search over messages
-                msg = msgin(j);
-            end
+            msg = msgin(1);
         else
             error('Expected 4 messages, but received more than 4.');
         end
@@ -139,6 +137,48 @@ end
 plot(t(1:count), num(1:count), 'k*'); grid on;
 
 disp(['Number of nonempty reads: ', num2str(count)]);
+
+end
+
+function CommandReadState(canch, ids, dt)
+% Read and plot the state for n seconds
+sec = 10;
+
+close all;
+%figure('Name', 'Index_0 position');
+
+% get the finger positions
+npoints = 300;
+finger_data_points = zeros(npoints,16);
+finger_time_points = zeros(npoints,1);
+
+% get offsets and directions
+enc_offsets = get_enc_offsets;
+enc_dirs = get_enc_directions;
+
+% clear the buffer
+msgs = receive(canch, inf);
+t0 = msgs(1).Timestamp;
+
+% get all finger positions, in degrees.
+for i=1:length(finger_data_points)
+    [fpos, t] = read_fingers(canch, ids);
+    finger_time_points(i) = t - t0;
+    fpos = (fpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
+    finger_data_points(i,:) = fpos;
+end
+
+names = {'index', 'middle', 'little', 'thumb'};
+
+%%%% BUG: The thumb joint 1 (base joint) is plotting as joint 2!
+for i=1:length(names)
+    indx = (i-1)*4 + 1;
+    figure('Name',names{i}); plot(finger_time_points, finger_data_points(:,indx:indx+3)); grid on;
+    legend('j1','j2','j3','j4');
+end
+
+% the mean for each
+disp(['mid position mean: ', mat2str(mean(finger_data_points), 1)]);
 
 end
 
@@ -196,37 +236,6 @@ tx_can_msg(canch, can_msg);
 
 end
 
-function ids = get_command_ids
-
-ids.ID_CMD_SET_SYSTEM_ON = hex2dec('01');
-ids.ID_CMD_SET_SYSTEM_OFF = hex2dec('02');
-ids.ID_CMD_SET_PERIOD = hex2dec('03');
-ids.ID_CMD_SET_MODE_JOINT = hex2dec('04');
-ids.ID_CMD_SET_MODE_TASK = hex2dec('05');
-ids.ID_CMD_SET_TORQUE_1 = hex2dec('06');
-ids.ID_CMD_SET_TORQUE_2 = hex2dec('07');
-ids.ID_CMD_SET_TORQUE_3 = hex2dec('08');
-ids.ID_CMD_SET_TORQUE_4 = hex2dec('09');
-ids.ID_CMD_QUERY_STATE_DATA = hex2dec('0e');
-ids.ID_CMD_QUERY_CONTROL_DATA = hex2dec('0f');
-
-% These are not documented
-ids.ID_CMD_QUERY_ID = hex2dec('10');
-ids.ID_CMD_AHRS_SET = hex2dec('11');
-ids.ID_CMD_AHRS_POSE = hex2dec('12');
-ids.ID_CMD_AHRS_ACC = hex2dec('13');
-ids.ID_CMD_AHRS_GYRO = hex2dec('14');
-ids.ID_CMD_AHRS_MAG = hex2dec('15');
-
-ids.ID_COMMON = hex2dec('01');
-ids.ID_DEVICE_MAIN = hex2dec('02');
-ids.ID_DEVICE_SUB_01 = hex2dec('03');
-ids.ID_DEVICE_SUB_02 = hex2dec('04');
-ids.ID_DEVICE_SUB_03 = hex2dec('05');
-ids.ID_DEVICE_SUB_04 = hex2dec('06');
-
-end
-
 function tx_can_msg(canch, can_msg)
 % We determine the data length by checking the size of the can_msg.data 
 % variable.
@@ -273,4 +282,115 @@ transmit(canch, message);
 
 %pause(10*1e-6);
 
+end
+
+function [fpos, t] = read_fingers(canch, ids)
+% Returns an array of 16 finger positions
+
+% read the array of finger can messages (4x)
+can_msgs = rx_can_msg(canch);
+while (isempty(can_msgs))
+    can_msgs = rx_can_msg(canch);
+end
+ 
+if (length(can_msgs) ~= 4)
+    error(['Expected 4 messages for finger positions, but got ', ...
+        num2str(length(can_msgs))]);
+end
+
+fpos = zeros(16,1);
+t = can_msgs(1).Timestamp;
+for i=1:4
+   % make sure the message is ID_CMD_QUERY_CONTROL_DATA type
+   message = can_msgs(i);
+   assert(message.UserData.cmd == ids.ID_CMD_QUERY_CONTROL_DATA, ...
+       'Unexpected cmd id type in read_fingers');
+   indx = (message.UserData.src - ids.ID_DEVICE_SUB_01)*4; 
+   data = message.Data;
+   fpos(indx + 1) = typecast(data(1:2),'uint16');
+   fpos(indx + 2) = typecast(data(3:4),'uint16');
+   fpos(indx + 3) = typecast(data(5:6),'uint16');
+   fpos(indx + 4) = typecast(data(7:8),'uint16');
+end
+
+end
+
+function can_msgs = rx_can_msg(canch)
+% A non-blocking read of the CANbus. Returns an array of all can messages
+% received, or an empty array if none exist.
+% The user data field of the can message contains a struct that defines
+% the cmd, src, dest, datalen.
+
+% receive all messages
+can_msgs = receive(canch, inf);
+
+% process the message specific info
+for i=1:length(can_msgs)
+    info.cmd = bitand(bitshift(can_msgs(i).ID, -6), hex2dec('1f'));
+    info.dst = bitand(bitshift(can_msgs(i).ID, -3), hex2dec('07'));
+    info.src = bitand(can_msgs(i).ID, hex2dec('07'));
+    can_msgs(i).UserData = info;
+end
+
+end
+
+function ids = get_command_ids
+
+ids.ID_CMD_SET_SYSTEM_ON = hex2dec('01');
+ids.ID_CMD_SET_SYSTEM_OFF = hex2dec('02');
+ids.ID_CMD_SET_PERIOD = hex2dec('03');
+ids.ID_CMD_SET_MODE_JOINT = hex2dec('04');
+ids.ID_CMD_SET_MODE_TASK = hex2dec('05');
+ids.ID_CMD_SET_TORQUE_1 = hex2dec('06');
+ids.ID_CMD_SET_TORQUE_2 = hex2dec('07');
+ids.ID_CMD_SET_TORQUE_3 = hex2dec('08');
+ids.ID_CMD_SET_TORQUE_4 = hex2dec('09');
+ids.ID_CMD_QUERY_STATE_DATA = hex2dec('0e');
+ids.ID_CMD_QUERY_CONTROL_DATA = hex2dec('0f');
+
+% These are not documented
+ids.ID_CMD_QUERY_ID = hex2dec('10');
+ids.ID_CMD_AHRS_SET = hex2dec('11');
+ids.ID_CMD_AHRS_POSE = hex2dec('12');
+ids.ID_CMD_AHRS_ACC = hex2dec('13');
+ids.ID_CMD_AHRS_GYRO = hex2dec('14');
+ids.ID_CMD_AHRS_MAG = hex2dec('15');
+
+ids.ID_COMMON = hex2dec('01');
+ids.ID_DEVICE_MAIN = hex2dec('02');
+ids.ID_DEVICE_SUB_01 = hex2dec('03');
+ids.ID_DEVICE_SUB_02 = hex2dec('04');
+ids.ID_DEVICE_SUB_03 = hex2dec('05');
+ids.ID_DEVICE_SUB_04 = hex2dec('06');
+
+end
+
+function offsets = get_enc_offsets
+% SAH030C033R
+offsets = [
+  -685, -200, -563, -17523,...
+  28, -18139, -16958, 414,...
+  -228, -456, 444, -522,...
+  -368, -439, 30, 17
+  ]';
+end
+
+function e_directions = get_enc_directions
+% SAH030xxxxx
+e_directions = [
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0
+  ]';
+end
+
+function m_directions = get_motor_directions
+% SAH030xxxxx
+m_directions = [
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0,...
+  1.0, 1.0, 1.0, 1.0
+  ]';
 end
