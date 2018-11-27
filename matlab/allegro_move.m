@@ -36,11 +36,25 @@ ids = get_command_ids;
 period_ms = 10;  % ms
 
 CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
-CommandReadState(canch, ids, period_ms*1e-3);
-%CommandReportMsgCount(canch, period_ms*1e-3);  % read the state
-%CommandSendTorque(canch, ids);  % command torque to the hand
-%CommandSendSingleTorque(canch, ids);  % command torque to the hand
 
+%% Read message tests
+%CommandReadState(canch, ids, period_ms*1e-3);
+%CommandReportMsgCount(canch, period_ms*1e-3);  % read the state
+
+%% Send torque commands to the hand
+
+% command only the index finger
+%CommandSendIndexTorque(canch, ids);
+%CommandSendSingleIndexTorque(canch, ids); pause(0.2);
+
+% command all fingers
+%CommandSendSingleTorques(canch, ids, 0.1*ones(16,1)); pause(0.2);
+CommandSendTorques(canch, ids, 0.2*ones(16,1)); pause(0.2);
+
+%% command a specific hand pose
+%CommandHandPose(canch, ids, 'scissors', period_ms*1e-3);
+
+%% Stop the process
 CommandSysClose(canch, ids);  % disable the hand
 
 disp(canch); % show status of CAN channel before closing
@@ -148,41 +162,57 @@ close all;
 %figure('Name', 'Index_0 position');
 
 % get the finger positions
-npoints = 300;
-finger_data_points = zeros(npoints,16);
-finger_time_points = zeros(npoints,1);
+npoints = 400;
+finger_data_points = zeros(npoints,16); % n-by-16
+finger_time_points = zeros(npoints,1); % n-by-1 
 
-% get offsets and directions
-enc_offsets = get_enc_offsets;
-enc_dirs = get_enc_directions;
-
-% clear the buffer
+% initialize, and clear the buffer
+t0 = 0; N = length(finger_data_points);
 msgs = receive(canch, inf);
 t0 = msgs(1).Timestamp;
 
 % get all finger positions, in degrees.
-for i=1:length(finger_data_points)
+for i=1:N
     [fpos, t] = read_fingers(canch, ids);
     finger_time_points(i) = t - t0;
-    fpos = (fpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
+    fpos = Raw2DegPositions(fpos); % convert to degrees
     finger_data_points(i,:) = fpos;
 end
 
 names = {'index', 'middle', 'little', 'thumb'};
 
-%%%% BUG: The thumb joint 1 (base joint) is plotting as joint 2!
 for i=1:length(names)
     indx = (i-1)*4 + 1;
     figure('Name',names{i}); plot(finger_time_points, finger_data_points(:,indx:indx+3)); grid on;
     legend('j1','j2','j3','j4');
 end
 
-% the mean for each
-disp(['mid position mean: ', mat2str(mean(finger_data_points), 1)]);
+end
+
+function dpos = Raw2DegPositions(rpos)
+% converts raw sensor positions to degrees, with proper offset and sign.
+
+% get offsets and directions
+enc_offsets = get_enc_offsets;
+enc_dirs = get_enc_directions;
+
+dpos = (rpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
 
 end
 
-function CommandSendSingleTorque(canch, ids)
+function radpos = Raw2RadPositions(rpos)
+% converts raw sensor positions to degrees, with proper offset and sign.
+
+% get offsets and directions
+enc_offsets = get_enc_offsets;
+enc_dirs = get_enc_directions;
+
+degpos = (rpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
+radpos = degpos * (pi/180);
+
+end
+
+function CommandSendSingleIndexTorque(canch, ids)
 
 % source and destination ids.
 dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
@@ -194,30 +224,135 @@ src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
 % 1200.0 is an empirical constant that will convert torque to PWM.
 tau_cov_const_v3 = 1200.0; % torque -> pwm conversion factor
 
-% desired torque is ordered from distal to proximal joints.
-tau_des = [0 0 0 0.05] .* tau_cov_const_v3; % torque (N-m)->PWM
+% desired torque is ordered from Distal to Proximal joints (WTF?!).
+tau_des = [0 0 0 -0.08];
+pwm_des = tau_des .* tau_cov_const_v3; % torque (N-m)->pwm
 
 can_msg.cmd_id = ids.ID_CMD_SET_TORQUE_1;
 can_msg.src_id = src_id;
 can_msg.dst_id = dst_id;
 can_msg.data = zeros(8,1);  % initialize the data vector
-can_msg.data([2, 1]) = typecast(int16(tau_des(1)), 'int8');
-can_msg.data([4, 3]) = typecast(int16(tau_des(2)), 'int8');
-can_msg.data([6, 5]) = typecast(int16(tau_des(3)), 'int8');
-can_msg.data([8, 7]) = typecast(int16(tau_des(4)), 'int8');
+can_msg.data([2, 1]) = typecast(int16(pwm_des(1)), 'uint8');
+can_msg.data([4, 3]) = typecast(int16(pwm_des(2)), 'uint8');
+can_msg.data([6, 5]) = typecast(int16(pwm_des(3)), 'uint8');
+can_msg.data([8, 7]) = typecast(int16(pwm_des(4)), 'uint8');
 
 % command torque for 1 second, updating every dt
 tx_can_msg(canch, can_msg);
 
 end
 
-function CommandSendTorque(canch, ids)
+function CommandSendIndexTorque(canch, ids)
 
 % command torque for 1 second, updating every dt
 dt = 0.003;
 for i=1:ceil(1/dt)
-    CommandSendSingleTorque(canch, ids);
+    CommandSendSingleIndexTorque(canch, ids);
     pause(dt);
+end
+
+end
+
+function CommandSendSingleTorques(canch, ids, tau_des)
+% Sends a single torque command to each of the joints.
+% the size of tau_des must be 16-by-1
+
+assert(length(tau_des) == 16, 'Torque signal must be 16 x 1');
+
+% saturate torques to the range [-1, 1]
+tau_des = max(tau_des, -1);
+tau_des = min(tau_des, 1);
+
+% source and destination ids.
+dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
+src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+
+%% command a torque to all fingers
+% From the documentation:
+% Note: PWM = Desired_Torque (N-m) * 1200.0.
+% 1200.0 is an empirical constant that will convert torque to PWM.
+tau_cov_const_v3 = 1200.0; % torque -> pwm conversion factor
+
+% desired torque is ordered from Distal to Proximal joints (WTF?!).
+pwm_des = tau_des .* tau_cov_const_v3; % torque (N-m)->PWM
+
+for indx=1:4  % loop over all the fingers
+    can_msg.cmd_id = ids.ID_CMD_SET_TORQUE_1 + (indx-1);
+    can_msg.src_id = src_id;
+    can_msg.dst_id = dst_id;
+    can_msg.data = zeros(8,1);  % initialize the data vector
+    base_indx = (indx-1)*4;
+    can_msg.data([2, 1]) = typecast(int16(pwm_des(base_indx + 1)), 'uint8');
+    can_msg.data([4, 3]) = typecast(int16(pwm_des(base_indx + 2)), 'uint8');
+    can_msg.data([6, 5]) = typecast(int16(pwm_des(base_indx + 3)), 'uint8');
+    can_msg.data([8, 7]) = typecast(int16(pwm_des(base_indx + 4)), 'uint8');
+    
+    tx_can_msg(canch, can_msg);
+end
+
+end
+
+function CommandSendTorques(canch, ids, tau_des)
+% Sends the same torque commands to all joints for 1 second.
+
+% The size of tau_des must be 16-by-1
+assert(length(tau_des) == 16, 'Torque signal must be 16 x 1');
+
+dt = 0.010;
+for i=1:ceil(1/dt)
+    CommandSendSingleTorques(canch, ids, tau_des);
+    pause(dt);
+end
+
+end
+
+function CommandHandPose(canch, ids, pose_str, dt)
+
+switch pose_str
+    case 'paper'
+        pose = get_paper_pose;
+    case 'rock'
+        pose = get_rock_pose;
+    case 'scissors'
+        pose = get_scissors_pose;
+    otherwise
+        warning(['Pose ',pose_str,' not recognized']);
+end
+
+CommandJointPositions(canch, ids, pose, dt);
+
+end
+
+function CommandJointPositions(canch, ids, pos_d, dt)
+% Runs a PD control on joint positions for n seconds
+secs = 2;
+
+[Kp, Kd] = get_gains(dt); % get the discretized gains
+
+debug_gain = .05; mask = ones(16,1); mask(4) = 1; % using position ordering
+Kp = Kp.*debug_gain; Kd = Kd.*debug_gain; % for debugging!
+
+% implement a control loop to regulate the pose (in position control).
+% initialize, and clear the buffer
+N = ceil(secs/dt);
+receive(canch, inf);
+
+% Finger ordering is [index, middle, little, thumb]
+% **Note: position (sensor) ordering is proximal to distal, torque command
+%         ordering is distal to proximal!
+for i=1:N
+    tic;
+    [pos_a, ~] = read_fingers(canch, ids); % position actual
+    pos_a = Raw2RadPositions(pos_a); % convert to radians
+    pos_err = (pos_d - pos_a);
+    tau_des = Kp.*pos_err.*mask;
+    % re-order torques from proximal to distal to distal to proximal
+    for j=1:4
+        base_indx = (j-1)*4;
+        tau_des(base_indx + 4:-1: base_indx + 1) = tau_des(base_indx + 1: base_indx + 4);
+    end
+    CommandSendSingleTorques(canch, ids, tau_des);
+    pause(dt-toc);
 end
 
 end
@@ -284,15 +419,20 @@ transmit(canch, message);
 
 end
 
-function [fpos, t] = read_fingers(canch, ids)
-% Returns an array of 16 finger positions
+function [fpos_out, t] = read_fingers(canch, ids)
+% Returns an array of 16 raw finger positions.
+% The ordering is: [index, middle, little, thumb].
+% Joint ordering per finger is proximal to distal.
+persistent fpos;
 
 % read the array of finger can messages (4x)
-can_msgs = rx_can_msg(canch);
-while (isempty(can_msgs))
-    can_msgs = rx_can_msg(canch);
+can_msgs = rx_can_msg(canch, 4);
+
+% if we get less than 4 messages, discard all messages and retry.
+while (length(can_msgs) < 4)
+    can_msgs = rx_can_msg(canch, 4);
 end
- 
+
 if (length(can_msgs) ~= 4)
     error(['Expected 4 messages for finger positions, but got ', ...
         num2str(length(can_msgs))]);
@@ -313,16 +453,18 @@ for i=1:4
    fpos(indx + 4) = typecast(data(7:8),'uint16');
 end
 
+fpos_out = fpos;
+
 end
 
-function can_msgs = rx_can_msg(canch)
+function can_msgs = rx_can_msg(canch, nmsgs)
 % A non-blocking read of the CANbus. Returns an array of all can messages
 % received, or an empty array if none exist.
 % The user data field of the can message contains a struct that defines
 % the cmd, src, dest, datalen.
 
 % receive all messages
-can_msgs = receive(canch, inf);
+can_msgs = receive(canch, nmsgs);
 
 % process the message specific info
 for i=1:length(can_msgs)
@@ -393,4 +535,49 @@ m_directions = [
   1.0, 1.0, 1.0, 1.0,...
   1.0, 1.0, 1.0, 1.0
   ]';
+end
+
+function positions = get_rock_pose
+positions = [
+    -0.1194, 1.2068, 1.0, 1.4042, ...
+    -0.0093, 1.2481, 1.4073, 0.8163, ...
+    0.1116, 1.2712, 1.3881, 1.0122, ...
+    0.6017, 0.2976, 0.9034, 0.7929
+    ]';
+end
+
+function positions = get_paper_pose
+positions = [
+    -0.1220, 0.4, 0.6, -0.0769, ...
+	0.0312, 0.4, 0.6, -0.0, ...
+	0.1767, 0.4, 0.6, -0.0528, ...
+	0.5284, 0.3693, 0.8977, 0.4863
+    ]';
+end
+
+function positions = get_scissors_pose
+positions = [
+    0.0885, 0.4, 0.6, -0.0704, ...
+	0.0312, 0.4, 0.6, -0.0, ...
+	0.1019, 1.2375, 1.1346, 1.0244, ...
+	1.0, 0.6331, 1.3509, 1.0
+    ]';
+end
+
+function [Kp, Kd] = get_gains(dt)
+
+Kp = [
+    500, 800, 900, 500, ...
+    500, 800, 900, 500, ...
+    500, 800, 900, 500, ...
+    1000, 700, 600, 600
+    ]' * dt;
+
+Kd = [
+    25, 50, 55, 40, ...
+    25, 50, 55, 40, ...
+    25, 50, 55, 40, ...
+    50, 50, 50, 40
+    ]' * dt;
+
 end
