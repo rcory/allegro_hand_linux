@@ -32,8 +32,10 @@ end
 % get the available message identifier fields for the Allegro hand.
 ids = get_command_ids;
 
-% set the communication period.
-period_ms = 10;  % ms
+% Set the communication period in milliseconds. This seems to be the 
+% minimum achievable period for torque control in Matlab (not great).
+period_ms = 10;  
+dt = period_ms*1e-3;
 
 CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 
@@ -41,7 +43,7 @@ CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 %CommandReadState(canch, ids, period_ms*1e-3);
 %CommandReportMsgCount(canch, period_ms*1e-3);  % read the state
 
-%% Send torque commands to the hand
+%% Send torque commands test
 
 % command only the index finger
 %CommandSendIndexTorque(canch, ids);
@@ -49,10 +51,15 @@ CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 
 % command all fingers
 %CommandSendSingleTorques(canch, ids, 0.1*ones(16,1)); pause(0.2);
-CommandSendTorques(canch, ids, 0.2*ones(16,1)); pause(0.2);
+%CommandSendTorques(canch, ids, 0.2*ones(16,1)); pause(0.2);
 
-%% command a specific hand pose
-%CommandHandPose(canch, ids, 'scissors', period_ms*1e-3);
+%% Command hand pose test
+% CommandHandPose(canch, ids, 'zero', period_ms*1e-3);
+% CommandHandPose(canch, ids, 'mug_grasp', period_ms*1e-3);
+
+%% Run motion sequence test
+%RunMugTwist(canch, ids, dt);
+RunRockPaperScissors(canch, ids, dt);
 
 %% Stop the process
 CommandSysClose(canch, ids);  % disable the hand
@@ -315,6 +322,17 @@ switch pose_str
         pose = get_rock_pose;
     case 'scissors'
         pose = get_scissors_pose;
+    case 'zero'
+        pose = get_zero_pose;
+    case 'mug_grasp'
+        pose = get_mug_grasp_pose;
+    case 'close_thumb'
+        pose = get_zero_pose;
+        pose(13:14) = [1.396, 0.3]';
+    case 'mug_twist1'
+        pose = get_mug_grasp_pose;
+        offsets = get_twist1_offsets;
+        pose = pose + offsets;
     otherwise
         warning(['Pose ',pose_str,' not recognized']);
 end
@@ -326,16 +344,19 @@ end
 function CommandJointPositions(canch, ids, pos_d, dt)
 % Runs a PD control on joint positions for n seconds
 secs = 2;
+N = ceil(secs/dt); % number of steps
 
-[Kp, Kd] = get_gains(dt); % get the discretized gains
+[Kp, Kd] = get_gains(dt*.15); % get the discretized gains
 
-debug_gain = .05; mask = ones(16,1); mask(4) = 1; % using position ordering
-Kp = Kp.*debug_gain; Kd = Kd.*debug_gain; % for debugging!
+mask = zeros(16,1); mask(:) = 1; % using position ordering
 
 % implement a control loop to regulate the pose (in position control).
 % initialize, and clear the buffer
-N = ceil(secs/dt);
 receive(canch, inf);
+
+% for velocity estimate
+pos_last = Raw2RadPositions(read_fingers(canch, ids)); % position actual
+vhist = zeros(16,N); % velocity history (rad/s)
 
 % Finger ordering is [index, middle, little, thumb]
 % **Note: position (sensor) ordering is proximal to distal, torque command
@@ -345,7 +366,15 @@ for i=1:N
     [pos_a, ~] = read_fingers(canch, ids); % position actual
     pos_a = Raw2RadPositions(pos_a); % convert to radians
     pos_err = (pos_d - pos_a);
-    tau_des = Kp.*pos_err.*mask;
+    
+    % compute the velocity
+    vel_a =  (pos_a - pos_last)./dt;
+    vhist(:,i) = vel_a;
+    pos_last = pos_a;
+    
+    % compute the torque command
+    tau_des = (Kp.*pos_err -Kd.*vel_a).*mask;
+    
     % re-order torques from proximal to distal to distal to proximal
     for j=1:4
         base_indx = (j-1)*4;
@@ -354,6 +383,32 @@ for i=1:N
     CommandSendSingleTorques(canch, ids, tau_des);
     pause(dt-toc);
 end
+
+% % plot the velocity history
+% vhist = max(vhist, -10);
+% vhist = min(vhist, 10);
+% figure(1); plot(0:dt:(N-1)*dt, vhist); grid on;
+
+end
+
+function RunMugTwist(canch, ids, dt)
+% Run the mug twist task (from drake/examples/allegro_hand)
+CommandHandPose(canch, ids, 'zero', dt);
+CommandHandPose(canch, ids, 'close_thumb', dt);
+CommandHandPose(canch, ids, 'mug_grasp', dt);
+CommandHandPose(canch, ids, 'mug_twist1', dt);
+CommandHandPose(canch, ids, 'mug_grasp', dt);
+CommandHandPose(canch, ids, 'zero', dt);
+
+end
+
+function RunRockPaperScissors(canch, ids, dt)
+
+CommandHandPose(canch, ids, 'zero', dt);
+CommandHandPose(canch, ids, 'rock', dt);
+CommandHandPose(canch, ids, 'paper', dt);
+CommandHandPose(canch, ids, 'scissors', dt);
+CommandHandPose(canch, ids, 'zero', dt);
 
 end
 
@@ -564,14 +619,46 @@ positions = [
     ]';
 end
 
+function positions = get_zero_pose
+positions = zeros(16,1);
+end
+
+function positions = get_mug_grasp_pose
+
+positions = [
+    0.08, 0.9, 0.75, 1.5, ...
+    0.1, 0.9, 0.75, 1.5, ...
+    0.12, 0.9, 0.75, 1.5, ...
+    1.396, 0.85, 0, 1.3
+    ]';
+
+end
+
+function offsets = get_twist1_offsets
+
+p1 = 0.6;
+p2 = 0.1;
+
+offsets = [
+    0, p1*1, p1*0.3, p1*0.5, ... % index
+    0, p2*1, p2*1, p2*0.5, ... % middle
+    0, 0, 0, 0, ... % little
+    0, 0, 0, 0, ... % thumb
+    ]';
+end
+
+function offsets = get_twist2_offsets
+
+end
+
 function [Kp, Kd] = get_gains(dt)
 
 Kp = [
-    500, 800, 900, 500, ...
-    500, 800, 900, 500, ...
-    500, 800, 900, 500, ...
-    1000, 700, 600, 600
-    ]' * dt;
+    500, 800, 400, 500, ...
+    500, 800, 400, 500, ...
+    500, 800, 400, 500, ...
+    600, 500, 600, 600
+    ]' * dt * 0.75;
 
 Kd = [
     25, 50, 55, 40, ...
