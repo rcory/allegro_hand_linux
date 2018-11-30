@@ -40,8 +40,8 @@ dt = period_ms*1e-3;
 CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 
 %% Read message tests
-%CommandReadState(canch, ids, period_ms*1e-3);
-%CommandReportMsgCount(canch, period_ms*1e-3);  % read the state
+%CommandReadState(canch, ids, dt);
+%CommandReportMsgCount(canch, dt);  % read the state
 
 %% Send torque commands test
 
@@ -54,12 +54,12 @@ CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 %CommandSendTorques(canch, ids, 0.2*ones(16,1)); pause(0.2);
 
 %% Command hand pose test
-% CommandHandPose(canch, ids, 'zero', period_ms*1e-3);
-% CommandHandPose(canch, ids, 'mug_grasp', period_ms*1e-3);
+CommandHandPose(canch, ids, 'zero', dt);
+% CommandHandPose(canch, ids, 'mug_grasp', dt);
 
 %% Run motion sequence test
 %RunMugTwist(canch, ids, dt);
-RunRockPaperScissors(canch, ids, dt);
+%RunRockPaperScissors(canch, ids, dt);
 
 %% Stop the process
 CommandSysClose(canch, ids);  % disable the hand
@@ -475,7 +475,8 @@ transmit(canch, message);
 end
 
 function [fpos_out, t] = read_fingers(canch, ids)
-% Returns an array of 16 raw finger positions.
+%READ_FINGERS Returns an array of 16 raw finger positions.
+% [fpos_out, t] = READ_FINGERS(canch, ids) reads on canch with ids.
 % The ordering is: [index, middle, little, thumb].
 % Joint ordering per finger is proximal to distal.
 persistent fpos;
@@ -658,13 +659,13 @@ Kp = [
     500, 800, 400, 500, ...
     500, 800, 400, 500, ...
     600, 500, 600, 600
-    ]' * dt * 0.75;
+    ]' * dt * 0.5;
 
 Kd = [
     25, 50, 55, 40, ...
     25, 50, 55, 40, ...
     25, 50, 55, 40, ...
     50, 50, 50, 40
-    ]' * dt;
+    ]' * dt * 1.2;
 
 end
