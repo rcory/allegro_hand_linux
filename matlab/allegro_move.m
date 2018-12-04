@@ -56,12 +56,12 @@ CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 %CommandSendTorques(canch, ids, zeros(16,1), dt); pause(0.2);
 
 %% Command hand pose test
-%CommandHandPose(canch, ids, 'zero', dt);
+CommandHandPose(canch, ids, 'zero', dt);
 %CommandHandPose(canch, ids, 'mug_grasp', dt);
 
 %% Run motion sequence test
 %RunMugTwist(canch, ids, dt);
-RunRockPaperScissors(canch, ids, dt);
+%RunRockPaperScissors(canch, ids, dt);
 
 %% Stop the process
 CommandSysClose(canch, ids);  % disable the hand
@@ -78,8 +78,8 @@ end
 function CommandSysInit(canch, ids, period_ms)
 
 % source and destination ids.
-dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
-src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+dst_id = ids.ID_COMMON;  % allegro hand id
+src_id = ids.ID_DEVICE_MAIN;  % control pc id
 
 % %% command query id (NOT SURE WHAT THIS DOES)
 % can_msg.cmd_id = ids.ID_CMD_QUERY_ID;
@@ -249,8 +249,8 @@ end
 function CommandSendSingleIndexTorque(canch, ids)
 
 % source and destination ids.
-dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
-src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+dst_id = ids.ID_COMMON;  % allegro hand id
+src_id = ids.ID_DEVICE_MAIN;  % control pc id
 
 %% command a torque to the index finger
 % From the documentation:
@@ -299,8 +299,8 @@ tau_des = max(tau_des, -1);
 tau_des = min(tau_des, 1);
 
 % source and destination ids.
-dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
-src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+dst_id = ids.ID_COMMON;  % allegro hand id
+src_id = ids.ID_DEVICE_MAIN;  % control pc id
 
 %% command a torque to all fingers
 % From the documentation:
@@ -453,8 +453,8 @@ end
 
 function CommandSysClose(canch, ids)
 % source and destination ids.
-dst_id = bitshift(ids.ID_COMMON, 3);  % allegro hand id
-src_id = uint32(ids.ID_DEVICE_MAIN);  % control pc id
+dst_id = ids.ID_COMMON;  % allegro hand id
+src_id = ids.ID_DEVICE_MAIN;  % control pc id
 
 %% set system off
 can_msg.cmd_id = ids.ID_CMD_SET_SYSTEM_OFF;
@@ -499,7 +499,7 @@ data = uint8(data);
 % set the command identifier in the CAN msg identifier
 cmd_id = bitshift(uint32(cmd_id), 6);
 
-id = bitor(cmd_id, dst_id); % 32-bit CAN message identifier
+id = bitor(cmd_id, bitshift(dst_id, 3)); % 32-bit CAN message identifier
 id = bitor(id, src_id);
 
 message = canMessage(id, false, dlen);
