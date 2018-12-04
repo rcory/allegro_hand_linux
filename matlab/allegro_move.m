@@ -42,24 +42,26 @@ CommandSysInit(canch, ids, period_ms);  % initialize and enable the hand
 %% Read message tests
 %CommandReadState(canch, ids, dt);
 %CommandReportMsgCount(canch, dt);  % read the state
+%CommandPrintState(canch, ids, 100, 0.75);
 
 %% Send torque commands test
 
 % command only the index finger
-%CommandSendIndexTorque(canch, ids);
+%CommandSendIndexTorque(canch, ids, dt);
 %CommandSendSingleIndexTorque(canch, ids); pause(0.2);
 
 % command all fingers
 %CommandSendSingleTorques(canch, ids, 0.1*ones(16,1)); pause(0.2);
 %CommandSendTorques(canch, ids, 0.2*ones(16,1)); pause(0.2);
+%CommandSendTorques(canch, ids, zeros(16,1), dt); pause(0.2);
 
 %% Command hand pose test
-CommandHandPose(canch, ids, 'zero', dt);
-% CommandHandPose(canch, ids, 'mug_grasp', dt);
+%CommandHandPose(canch, ids, 'zero', dt);
+%CommandHandPose(canch, ids, 'mug_grasp', dt);
 
 %% Run motion sequence test
 %RunMugTwist(canch, ids, dt);
-%RunRockPaperScissors(canch, ids, dt);
+RunRockPaperScissors(canch, ids, dt);
 
 %% Stop the process
 CommandSysClose(canch, ids);  % disable the hand
@@ -196,26 +198,51 @@ end
 
 end
 
-function dpos = Raw2DegPositions(rpos)
-% converts raw sensor positions to degrees, with proper offset and sign.
+function CommandPrintState(canch, ids, s, dt)
+% Prints the read joint positions for s seconds every dt seconds
+
+for i=1:ceil(s/dt)
+    tic;
+    receive(canch, inf); % clear the queue
+    fpos = Raw2DegPositions(read_fingers(canch, ids));
+    %fpos = Raw2RadPositions(read_fingers(canch, ids));
+    %fpos = RawPositions(read_fingers(canch, ids));
+    %fpos = read_fingers(canch, ids);
+    
+    mask = zeros(16,1);
+    %mask(1:4) = ones(4,1); % index
+    %mask(5:8) = ones(4,1); % middle
+    %mask(9:12) = ones(4,1); % little
+    %mask(13:16) = ones(4,1); % thumb
+    mask(:) = 1; % all
+    
+    disp(['q = ', mat2str(fpos'.*mask',6)]);
+    pause(dt-toc);
+end
+
+end
+
+function rawpos = RawPositions(rpos)
 
 % get offsets and directions
 enc_offsets = get_enc_offsets;
 enc_dirs = get_enc_directions;
 
-dpos = (rpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
+rawpos = rpos.*enc_dirs - 32768 - enc_offsets;
+
+end
+
+function dpos = Raw2DegPositions(rpos)
+% converts raw sensor positions to degrees, with proper offset and sign.
+
+dpos = RawPositions(rpos)*(333.3/65536.0); % in degrees
 
 end
 
 function radpos = Raw2RadPositions(rpos)
-% converts raw sensor positions to degrees, with proper offset and sign.
+% converts raw sensor positions to radians, with proper offset and sign.
 
-% get offsets and directions
-enc_offsets = get_enc_offsets;
-enc_dirs = get_enc_directions;
-
-degpos = (rpos.*enc_dirs-32768-(enc_offsets))*(333.3/65536.0); % in degrees
-radpos = degpos * (pi/180);
+radpos = RawPositions(rpos).*((333.3/65536.0)*(pi/180)); % in radians
 
 end
 
@@ -249,13 +276,14 @@ tx_can_msg(canch, can_msg);
 
 end
 
-function CommandSendIndexTorque(canch, ids)
+function CommandSendIndexTorque(canch, ids, dt)
 
 % command torque for 1 second, updating every dt
-dt = 0.003;
+
 for i=1:ceil(1/dt)
+    tic;
     CommandSendSingleIndexTorque(canch, ids);
-    pause(dt);
+    pause(dt-toc);
 end
 
 end
@@ -299,16 +327,16 @@ end
 
 end
 
-function CommandSendTorques(canch, ids, tau_des)
+function CommandSendTorques(canch, ids, tau_des, dt)
 % Sends the same torque commands to all joints for 1 second.
 
 % The size of tau_des must be 16-by-1
 assert(length(tau_des) == 16, 'Torque signal must be 16 x 1');
 
-dt = 0.010;
-for i=1:ceil(1/dt)
+for i=1:ceil(10/dt)
+    tic;
     CommandSendSingleTorques(canch, ids, tau_des);
-    pause(dt);
+    pause(dt-toc);
 end
 
 end
@@ -346,7 +374,8 @@ function CommandJointPositions(canch, ids, pos_d, dt)
 secs = 2;
 N = ceil(secs/dt); % number of steps
 
-[Kp, Kd] = get_gains(dt*.15); % get the discretized gains
+[Kp, Kd] = get_gains(dt*0.15); % get the discretized gains
+Kp = Kp.*0.58; Kd = Kd.*0.27;
 
 mask = zeros(16,1); mask(:) = 1; % using position ordering
 
@@ -356,7 +385,9 @@ receive(canch, inf);
 
 % for velocity estimate
 pos_last = Raw2RadPositions(read_fingers(canch, ids)); % position actual
-vhist = zeros(16,N); % velocity history (rad/s)
+vahist = zeros(16,N); % velocity history (rad/s)
+vfhist = zeros(16,N); % filtered velocity history
+fwindow = 2;
 
 % Finger ordering is [index, middle, little, thumb]
 % **Note: position (sensor) ordering is proximal to distal, torque command
@@ -369,11 +400,18 @@ for i=1:N
     
     % compute the velocity
     vel_a =  (pos_a - pos_last)./dt;
-    vhist(:,i) = vel_a;
+    vahist(:,i) = vel_a;
+    if (i == 1)
+        vfhist(:,1) = vel_a;
+    else
+        indx = i-1:-1:max(1,i-fwindow+1);
+        vfhist(:,i) = (vel_a + sum(vfhist(:,indx),2))/(length(indx)+1);
+    end
     pos_last = pos_a;
     
     % compute the torque command
-    tau_des = (Kp.*pos_err -Kd.*vel_a).*mask;
+    %tau_des = (Kp.*pos_err -Kd.*vel_a).*mask;
+    tau_des = (Kp.*pos_err -Kd.*vfhist(:,i)).*mask;
     
     % re-order torques from proximal to distal to distal to proximal
     for j=1:4
@@ -387,7 +425,8 @@ end
 % % plot the velocity history
 % vhist = max(vhist, -10);
 % vhist = min(vhist, 10);
-% figure(1); plot(0:dt:(N-1)*dt, vhist); grid on;
+%figure(1); plot(0:dt:(N-1)*dt, vahist); grid on; hold on;
+%plot(0:dt:(N-1)*dt,vfhist(4,:),'k');
 
 end
 
@@ -659,13 +698,13 @@ Kp = [
     500, 800, 400, 500, ...
     500, 800, 400, 500, ...
     600, 500, 600, 600
-    ]' * dt * 0.5;
+    ]' * dt;
 
 Kd = [
     25, 50, 55, 40, ...
     25, 50, 55, 40, ...
     25, 50, 55, 40, ...
     50, 50, 50, 40
-    ]' * dt * 1.2;
+    ]' * dt;
 
 end
