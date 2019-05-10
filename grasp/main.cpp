@@ -14,6 +14,11 @@
 #include "RockScissorsPaper.h"
 #include <BHand/BHand.h>
 
+#include <lcm/lcm-cpp.hpp>
+
+#include "lcmdef/lcmt_allegro_status.hpp"
+#include "lcmdef/lcmt_allegro_command.hpp"
+
 typedef char    TCHAR;
 #define _T(X)   X
 #define _tcsicmp(x, y)   strcmp(x, y)
@@ -40,6 +45,35 @@ double q[MAX_DOF];
 double q_des[MAX_DOF];
 double tau_des[MAX_DOF];
 double cur_des[MAX_DOF];
+
+// ================================ LCM Message Handler ==========
+class Handler {
+ public:
+  ~Handler() {}
+  void handleMessage(const lcm::ReceiveBuffer *rbuf, const std::string &chan,
+                     const lcmdef::lcmt_allegro_command *msg)
+  {
+    int i;
+//    printf("Received message on channel \"%s\":\n", chan.c_str());
+//    printf("  timestamp   = %lld\n", (long long) msg->utime);
+//    printf("  position    = (%f, %f, %f, %f)\n",
+//           msg->joint_position[0],
+//           msg->joint_position[1],
+//           msg->joint_position[2],
+//           msg->joint_position[3]);
+
+    for (i = 0; i < MAX_DOF; i++) {
+      q_des[i] = msg->joint_position[i];
+    }
+
+  }
+};
+// ==================================================
+
+// lcm vars
+lcm::LCM my_lcm;
+lcmdef::lcmt_allegro_status allegro_status;
+Handler handlerObject;
 
 // USER HAND CONFIGURATION
 const bool	RIGHT_HAND = true;
@@ -218,8 +252,11 @@ static void* ioThreadProc(void* inst)
 		    // convert encoder count to joint angle
 		    for (i=0; i<MAX_DOF; i++)
 		      {
-			q[i] = (double)(vars.enc_actual[i]*enc_dir[i]-32768-enc_offset[i])*(333.3/65536.0)*(3.141592/180.0);
+			    q[i] = (double)(vars.enc_actual[i]*enc_dir[i]-32768-enc_offset[i])*(333.3/65536.0)*(3.141592/180.0);
 		      }
+
+            // get the desired position from Drake
+            my_lcm.handleTimeout(1);
 
 		    // compute joint torque
 		    ComputeTorque();
@@ -227,40 +264,50 @@ static void* ioThreadProc(void* inst)
 		    // convert desired torque to desired current and PWM count
 		    for (i=0; i<MAX_DOF; i++)
 		      {
-			cur_des[i] = tau_des[i] * motor_dir[i];
-			if (cur_des[i] > 1.0) cur_des[i] = 1.0;
-			else if (cur_des[i] < -1.0) cur_des[i] = -1.0;
+                cur_des[i] = tau_des[i] * motor_dir[i];
+                if (cur_des[i] > 1.0) cur_des[i] = 1.0;
+                else if (cur_des[i] < -1.0) cur_des[i] = -1.0;
 		      }
 
 		    // send torques
-		    for (int i=0; i<4;i++)
+		    for (i=0; i<4;i++)
 		      {
-			// the index order for motors is different from that of encoders
-			switch (HAND_VERSION)
-			  {
-			  case 1:
-			  case 2:
-			    vars.pwm_demand[i*4+3] = (short)(cur_des[i*4+0]*tau_cov_const_v2);
-			    vars.pwm_demand[i*4+2] = (short)(cur_des[i*4+1]*tau_cov_const_v2);
-			    vars.pwm_demand[i*4+1] = (short)(cur_des[i*4+2]*tau_cov_const_v2);
-			    vars.pwm_demand[i*4+0] = (short)(cur_des[i*4+3]*tau_cov_const_v2);
-			    break;
+                // the index order for motors is different from that of encoders
+                switch (HAND_VERSION)
+                {
+                  case 1:
+                  case 2:
+                    vars.pwm_demand[i*4+3] = (short)(cur_des[i*4+0]*tau_cov_const_v2);
+                    vars.pwm_demand[i*4+2] = (short)(cur_des[i*4+1]*tau_cov_const_v2);
+                    vars.pwm_demand[i*4+1] = (short)(cur_des[i*4+2]*tau_cov_const_v2);
+                    vars.pwm_demand[i*4+0] = (short)(cur_des[i*4+3]*tau_cov_const_v2);
+                    break;
 
-			  case 3:
-			  default:
-			    vars.pwm_demand[i*4+3] = (short)(cur_des[i*4+0]*tau_cov_const_v3);
-			    vars.pwm_demand[i*4+2] = (short)(cur_des[i*4+1]*tau_cov_const_v3);
-			    vars.pwm_demand[i*4+1] = (short)(cur_des[i*4+2]*tau_cov_const_v3);
-			    vars.pwm_demand[i*4+0] = (short)(cur_des[i*4+3]*tau_cov_const_v3);
-			    break;
-			  }
-			write_current(CAN_Ch, i, &vars.pwm_demand[4*i]);
-			usleep(5);
+                  case 3:
+                  default:
+                    vars.pwm_demand[i*4+3] = (short)(cur_des[i*4+0]*tau_cov_const_v3);
+                    vars.pwm_demand[i*4+2] = (short)(cur_des[i*4+1]*tau_cov_const_v3);
+                    vars.pwm_demand[i*4+1] = (short)(cur_des[i*4+2]*tau_cov_const_v3);
+                    vars.pwm_demand[i*4+0] = (short)(cur_des[i*4+3]*tau_cov_const_v3);
+                    break;
+                }
+                write_current(CAN_Ch, i, &vars.pwm_demand[4*i]);
+                usleep(5);
 		      }
 		    sendNum++;
 		    curTime += delT;
 
 		    data_return = 0;
+
+            // write the lcm status
+            allegro_status.utime = curTime * 1e6;
+            for (i=0; i<MAX_DOF; i++)
+            {
+              allegro_status.joint_position_measured[i] = q[i];
+              allegro_status.joint_torque_commanded[i] = cur_des[i];
+            }
+            my_lcm.publish("ALLEGRO_STATUS", &allegro_status);
+
 		  }
 	      }
 	      break;
@@ -335,6 +382,10 @@ void MainLoop()
 	  MotionPaper();
 	  break;
 
+    case '4':
+      MotionDrake();
+      break;
+
         }
     }
 }
@@ -398,7 +449,7 @@ bool OpenCAN()
     }
 
   printf(">CAN: system init\n");
-  ret = command_can_sys_init(CAN_Ch, 3/*msec*/);
+  ret = command_can_sys_init(CAN_Ch, delT * 1000 /*msec*/);
   if(ret < 0)
     {
       printf("ERROR command_can_sys_init !!! \n");
@@ -574,6 +625,18 @@ int main(int argc, TCHAR* argv[])
   memset(tau_des, 0, sizeof(tau_des));
   memset(cur_des, 0, sizeof(cur_des));
   curTime = 0.0;
+
+  if (!my_lcm.good())
+    return 1;
+  else {
+    allegro_status.num_joints = 16;
+    allegro_status.joint_position_measured.resize(16);
+    allegro_status.joint_velocity_estimated.resize(16);
+    allegro_status.joint_position_commanded.resize(16);
+    allegro_status.joint_torque_commanded.resize(16);
+
+    my_lcm.subscribe("ALLEGRO_COMMAND", &Handler::handleMessage, &handlerObject);
+  }
 
   if (CreateBHandAlgorithm() && OpenCAN())
     MainLoop();

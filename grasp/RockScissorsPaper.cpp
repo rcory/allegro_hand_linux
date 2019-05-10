@@ -59,6 +59,13 @@ static void SetGainsRSP()
 	pBHand->SetGainsEx(kp, kd);
 }
 
+void MotionDrake()
+{
+	if (pBHand) pBHand->SetMotionType(eMotionType_JOINT_PD);
+	SetGainsRSP();
+
+}
+
 void MotionRock()
 {
 	for (int i=0; i<16; i++)
